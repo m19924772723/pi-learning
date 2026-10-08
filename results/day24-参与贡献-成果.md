@@ -130,3 +130,60 @@ M  packages/ai/src/api/google-shared.ts                       ← 修复（+1 �
 4. **最小复现 + worktree 实测**是贡献者自证的三板斧：不依赖记忆，编译器和隔离工作区说了算。
 
 一句话总结：Day 24 完成了 pi 仓库贡献的完整练手闭环——从 `npm run check` 发现脏 diff，到最小复现 + worktree 双验证坐实 `TOO_MANY_TOOL_CALLS` 断红，1 行修复 + 39 行枚举级测试，最终 check 全绿。至此 20 天学习计划 + 四个进阶方向全部完成。
+
+---
+
+## 七、更正与收尾（10-07）：上游 main 已包含同一修复
+
+Day 24 的练手闭环在本地成立，但「把它真正提给上游」这一步执行后，必须先说清一个更正：**这个 bug 上游早已修复，我们的 1 行修复对上游没有增量价值**。
+
+### 7.1 实际操作链
+
+1. fork 上游到自己账号（`m19924772723/pi`）；
+2. 本地建分支 `fix/ai-google-map-too-many-tool-calls`，只 stage 本次两个文件 → commit `d8e5c38`（2 files changed, 40 insertions）；
+3. 按 CONTRIBUTING 门禁，先开 issue 等维护者 `lgtm`，不直接提 PR → issue **#10637**；
+4. `git fetch origin main` + `git rebase origin/main`（base 由 `71dca87` 前移到上游 HEAD `1cedd3272`）→ 改写为 `e3efecdcb`，`--force-with-lease` 推到 fork。
+
+### 7.2 修复在 rebase 后「消失」了
+
+rebase 后 `git show --stat e3efecdcb` 只剩 1 个文件：
+
+```
+packages/ai/test/google-shared-stop-reason.test.ts | 39 +
+```
+
+`google-shared.ts` 的那 1 行修复不在 commit 里——git 判定 same patch already applied，静默跳过。直接查上游源码确认：
+
+```
+$ git show origin/main:packages/ai/src/api/google-shared.ts
+case FinishReason.MALFORMED_FUNCTION_CALL:
+case FinishReason.UNEXPECTED_TOOL_CALL:
+case FinishReason.TOO_MANY_TOOL_CALLS:      ← 上游已有，语义与我们的修复逐字相同
+case FinishReason.NO_IMAGE:
+		return "error";
+```
+
+### 7.3 考古结论：本地 clone 的历史恰好停在「坏状态」
+
+- 本地仓库是 **shallow clone**（`git rev-parse --is-shallow-repository` → `true`），`.git/shallow` = `71dca871bc80b6bc97be37f0ca3189399d651fff`；
+- `71dca871b "fix(ci): Fix a broken test"` 恰好**删除了** `TOO_MANY_TOOL_CALLS` 这个 case，所以本地 HEAD 上能稳定复现 TS2322；
+- 上游随后 `ceea48f5d Revert "fix(ci): Fix a broken test"`（`packages/ai/src/api/google-shared.ts | 1 +`）把它恢复；
+- `71dca871b..1cedd3272` 之间还有约 6817 个 commit——本次断红的「证据」来自一段**已被上游回滚的历史**，不是当前上游的缺陷。
+
+### 7.4 收尾
+
+- issue #10637 被上游 issue-gate 自动关闭（新贡献者 issue 默认自动关闭，维护者每日复核后再决定是否 reopen），状态 `CLOSED / NOT_PLANNED`；
+- 已在 #10637 追加更正评论：上游 `main` 已含同一修复、撤回提案、不提交重复 PR（重复提案是噪音，且 CONTRIBUTING 禁止未获 `lgtm` 提 PR）；
+- fork 分支 `fix/ai-google-map-too-many-tool-calls`（`e3efecdcb`）保留，作为完整流程演练的证据。
+
+### 7.5 仍存在的真实增量（若维护者认可）
+
+上游 `packages/ai/test/google-raw-stop-reason.test.ts` 的 `FinishReason` mock **漏掉了 `TOO_MANY_TOOL_CALLS`**（其余 17 个成员齐全），且没有任何测试断言该成员的映射——这正是 `71dca871b` 删掉该 case 后 CI 仍能通过的原因。可提「仅测试」PR：补 mock 成员 + 一条 `→ error` 断言。按门禁需先获 `lgtm`。
+
+### 7.6 复盘：这一节比修复本身更值钱
+
+1. **先同步上游再判 bug**：任何「我发现了 bug」的结论都必须基于最新 `origin/main`；陈旧或 shallow 的 clone 会把历史上被回滚的状态当成现存缺陷；
+2. **本地 HEAD 断红 ≠ 上游断红**：断红必须在目标分支上复现才算数；
+3. **rebase 静默跳过相同 patch 是强信号**：commit 里凭空少了一个文件的改动，说明上游已经改过同一处；
+4. **按门禁走是先见之明**：因为先开 issue 等 `lgtm`、没有直接提 PR，这次「重复」只停留在一封已自动关闭的提案上，没有占用维护者一次 PR review；
+5. **练手结论不变**：`TOO_MANY_TOOL_CALLS` 漏配确实是一类真实断红（exhaustive switch + 依赖枚举新增），只是这次恰好撞上一段已被回滚的上游历史快照。
